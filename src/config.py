@@ -43,8 +43,8 @@ DAY_CONFIG = {
         "main_key": "squat",    "second_key": "rdl"},
     2: {"name": "Bench / BTN Press", "emoji": "🏋️", "focus": "upper_push",
         "main_key": "bench",    "second_key": "btn_press"},
-    3: {"name": "Deadlift / Zercher","emoji": "💀", "focus": "lower_hinge",
-        "main_key": "deadlift", "second_key": "zercher_squat"},
+    3: {"name": "Deadlift / Box Squat","emoji": "💀", "focus": "lower_hinge",
+        "main_key": "deadlift", "second_key": "box_squat"},
     4: {"name": "Press / CG Bench",  "emoji": "🔱", "focus": "upper_push",
         "main_key": "ohp",      "second_key": "cg_bench"},
     5: {"name": "Row / Seal Row",    "emoji": "🚣", "focus": "upper_pull",
@@ -83,7 +83,7 @@ LIFT_BODY_PART = {
     # 2nd lifts
     "rdl": "lower",
     "btn_press": "upper",
-    "zercher_squat": "lower",
+    "box_squat": "lower",
     "cg_bench": "upper",
     "seal_row": "upper",
 }
@@ -142,8 +142,8 @@ def classify_amrap(reps: int) -> str:
 # Accessories are logged but not auto-progressed.
 EXERCISE_DB = {
     # ── D1: Squat / RDL ──────────────────────────────────────
-    "38FC1AB9": {
-        "name": "Squat to Box (Barbell)",
+    "D04AC939": {
+        "name": "Squat (Barbell)",
         "day": 1, "role": "main", "lift_key": "squat",
         "muscle_group": "Piernas", "is_compound": True,
     },
@@ -179,6 +179,11 @@ EXERCISE_DB = {
         "day": 2, "role": "second", "lift_key": "btn_press",
         "muscle_group": "Hombros", "is_compound": True,
     },
+    "1B2B1E7C": {
+        "name": "Pull Up",
+        "day": 2, "role": "accessory", "lift_key": "pull_up_d2",
+        "muscle_group": "Espalda", "is_compound": True,
+    },
     "4E5257DE": {
         "name": "Lat Pulldown - Close Grip (Cable)",
         "day": 2, "role": "accessory", "lift_key": "lat_pulldown_v",
@@ -189,17 +194,16 @@ EXERCISE_DB = {
         "day": 2, "role": "accessory", "lift_key": "barbell_curl",
         "muscle_group": "Bíceps", "is_compound": False,
     },
-    # TODO: add chest fly / pec deck for extra pecho volume
 
-    # ── D3: Deadlift / Zercher Squat ─────────────────────────
+    # ── D3: Deadlift / Box Squat ─────────────────────────────
     "C6272009": {
         "name": "Deadlift (Barbell)",
         "day": 3, "role": "main", "lift_key": "deadlift",
         "muscle_group": "Espalda Baja", "is_compound": True,
     },
-    "40C6A9FC": {
-        "name": "Zercher Squat",
-        "day": 3, "role": "second", "lift_key": "zercher_squat",
+    "38FC1AB9": {
+        "name": "Box Squat (Barbell)",
+        "day": 3, "role": "second", "lift_key": "box_squat",
         "muscle_group": "Piernas", "is_compound": True,
     },
     "11A123F3": {
@@ -207,12 +211,16 @@ EXERCISE_DB = {
         "day": 3, "role": "accessory", "lift_key": "leg_curl",
         "muscle_group": "Isquios", "is_compound": False,
     },
+    "4F5866F8": {
+        "name": "Back Extension (Hyperextension)",
+        "day": 3, "role": "accessory", "lift_key": "back_extension",
+        "muscle_group": "Espalda Baja", "is_compound": False,
+    },
     "F8356514": {
         "name": "Hanging Leg Raise",
         "day": 3, "role": "accessory", "lift_key": "hanging_leg_raise",
         "muscle_group": "Core", "is_compound": False,
     },
-    # TODO: add Back Extension for low back
 
     # ── D4: OHP / CG Bench ───────────────────────────────────
     "7B8D84E8": {
@@ -229,6 +237,11 @@ EXERCISE_DB = {
         "name": "Lateral Raise (Dumbbell)",
         "day": 4, "role": "accessory", "lift_key": "lateral_raise",
         "muscle_group": "Hombros", "is_compound": False,
+    },
+    "875F585F": {
+        "name": "Skullcrusher (Barbell)",
+        "day": 4, "role": "accessory", "lift_key": "skullcrusher",
+        "muscle_group": "Tríceps", "is_compound": False,
     },
     "93A552C6": {
         "name": "Triceps Pushdown",
@@ -252,19 +265,32 @@ EXERCISE_DB = {
         "day": 5, "role": "accessory", "lift_key": "chest_dip",
         "muscle_group": "Pecho", "is_compound": True,
     },
-    "37FCC2BB": {
-        "name": "Bicep Curl (Dumbbell)",
-        "day": 5, "role": "accessory", "lift_key": "bicep_curl_db",
-        "muscle_group": "Bíceps", "is_compound": False,
+    "1B2B1E7C:D5": {
+        "name": "Pull Up",
+        "day": 5, "role": "accessory", "lift_key": "pull_up_d5",
+        "muscle_group": "Espalda", "is_compound": True,
+        "hevy_template_id": "1B2B1E7C",
+    },
+    "3285411d-1115-4dc9-a49c-4123a6813fa0": {
+        "name": "90/90 Breathing",
+        "day": 5, "role": "accessory", "lift_key": "breathing_90_90",
+        "muscle_group": "Core", "is_compound": False,
     },
 }
 
 # ── Quick Lookups ────────────────────────────────────────────────────
-TID_TO_LIFT = {tid: ex["lift_key"] for tid, ex in EXERCISE_DB.items()}
-LIFT_TO_TID = {ex["lift_key"]: tid for tid, ex in EXERCISE_DB.items()}
-MAIN_LIFTS = {tid: ex for tid, ex in EXERCISE_DB.items() if ex["role"] == "main"}
-SECOND_LIFTS = {tid: ex for tid, ex in EXERCISE_DB.items() if ex["role"] == "second"}
-ACCESSORY_LIFTS = {tid: ex for tid, ex in EXERCISE_DB.items() if ex["role"] == "accessory"}
+def _hevy_tid(key: str) -> str:
+    """Get real Hevy template ID from config key (strips :Dx suffix)."""
+    return EXERCISE_DB[key].get("hevy_template_id", key.split(":")[0])
+
+TID_TO_LIFT = {_hevy_tid(k): ex["lift_key"] for k, ex in EXERCISE_DB.items()}
+LIFT_TO_TID = {ex["lift_key"]: _hevy_tid(k) for k, ex in EXERCISE_DB.items()}
+MAIN_LIFTS = {k: ex for k, ex in EXERCISE_DB.items() if ex["role"] == "main"}
+SECOND_LIFTS = {k: ex for k, ex in EXERCISE_DB.items() if ex["role"] == "second"}
+ACCESSORY_LIFTS = {k: ex for k, ex in EXERCISE_DB.items() if ex["role"] == "accessory"}
+
+# Map config key → real Hevy template ID
+CONFIG_KEY_TO_TID = {k: _hevy_tid(k) for k in EXERCISE_DB}
 
 # ── Strength Standards (multiples of BW) ────────────────────────────
 STRENGTH_STANDARDS = {

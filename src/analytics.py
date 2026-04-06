@@ -28,7 +28,7 @@ from src.config import (
     EXERCISE_DB, TID_TO_LIFT, LIFT_TO_TID, MAIN_LIFTS, SECOND_LIFTS,
     DAY_CONFIG, DAY_ROUTINE_MAP, BODYWEIGHT, STRENGTH_STANDARDS,
     WAVE_SCHEME_MAIN, WAVE_SCHEME_SECOND, LIFT_BODY_PART, INCREMENT,
-    get_increment, classify_amrap, round_to_plate,
+    get_increment, classify_amrap, round_to_plate, CONFIG_KEY_TO_TID,
 )
 
 HEVY_API_KEY = os.environ.get("HEVY_API_KEY", "")
@@ -187,9 +187,10 @@ def detect_waves(df: pd.DataFrame) -> dict:
             result[ex["lift_key"]] = _empty_wave_state(ex["lift_key"], ex["role"])
         return result
 
-    for tid, ex in {**MAIN_LIFTS, **SECOND_LIFTS}.items():
+    for config_key, ex in {**MAIN_LIFTS, **SECOND_LIFTS}.items():
         lift_key = ex["lift_key"]
         role = ex["role"]
+        tid = CONFIG_KEY_TO_TID[config_key]
 
         # Get all sessions for this lift, chronological
         lift_df = df[df["exercise_template_id"] == tid].copy()
@@ -341,10 +342,11 @@ def build_routine_exercises(day_num: int, waves: dict) -> list[dict]:
     })
 
     # ── Accessories ──────────────────────────────────────────
-    for tid, ex in EXERCISE_DB.items():
+    for config_key, ex in EXERCISE_DB.items():
         if ex["day"] == day_num and ex["role"] == "accessory":
+            real_tid = CONFIG_KEY_TO_TID[config_key]
             exercises.append({
-                "exercise_template_id": tid,
+                "exercise_template_id": real_tid,
                 "superset_id": None,
                 "rest_seconds": 90,
                 "notes": "3-4 x 10-15",

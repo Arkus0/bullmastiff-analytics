@@ -78,7 +78,7 @@ class TestWaveDetection:
         df = pd.DataFrame([{
             "date": pd.Timestamp("2026-04-07"),
             "hevy_id": "test1",
-            "exercise_template_id": "38FC1AB9",  # squat
+            "exercise_template_id": "D04AC939",  # back squat
             "role": "main",
             "lift_key": "squat",
             "max_weight": 60,
