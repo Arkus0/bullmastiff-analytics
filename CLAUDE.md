@@ -13,7 +13,17 @@ Bromley Baby Bully adapted to 5 days. Wave-based progression with AMRAP-driven i
 ## Key IDs
 - Hevy API Key: env var `HEVY_API_KEY`
 - Notion Token: env var `NOTION_TOKEN`
+- Hevy Folder: `2653107`
+- Notion Logbook DB: `33acbc49-9cfe-8129-b2f3-e116c5997c11`
+- Notion Analytics Page: `33acbc49-9cfe-8116-81e0-d4c57aa119b1`
 - Workout title prefix: `BM D` (e.g. "BM D1 Squat / RDL")
+
+## Hevy Routine IDs
+- D1 Squat/RDL: `322fe8c0-8e7e-4d71-bc8d-0fb19450f1fc`
+- D2 Bench/BTN: `a43f6dbf-1ee3-4f46-87e7-1fe01f2b4749`
+- D3 Deadlift/Box Squat: `b508ec84-ff21-4dc2-bc54-6516adab4237`
+- D4 Press/CG Bench: `55852c04-1f11-4419-9d89-addc8e0004b9`
+- D5 Row/Seal Row: `223f783f-04d2-441e-bb53-e3875dd96244`
 
 ## Exercise Template IDs
 - Squat to Box: `38FC1AB9`

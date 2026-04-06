@@ -16,8 +16,8 @@ HEVY_API_KEY = os.environ.get("HEVY_API_KEY", "")
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 
 # ── Notion IDs ───────────────────────────────────────────────────────
-NOTION_LOGBOOK_DB = os.environ.get("NOTION_LOGBOOK_DB", "")  # TODO: create
-NOTION_ANALYTICS_PAGE = os.environ.get("NOTION_ANALYTICS_PAGE", "")  # TODO: create
+NOTION_LOGBOOK_DB = os.environ.get("NOTION_LOGBOOK_DB", "33acbc49-9cfe-8129-b2f3-e116c5997c11")
+NOTION_ANALYTICS_PAGE = os.environ.get("NOTION_ANALYTICS_PAGE", "33acbc49-9cfe-8116-81e0-d4c57aa119b1")
 
 # ── Physical Constants ───────────────────────────────────────────────
 BODYWEIGHT = 86.0  # kg
@@ -26,15 +26,15 @@ BODYWEIGHT = 86.0  # kg
 PROGRAM_START = "2026-04-07"  # First Baby Mastiff session
 
 # ── Hevy Folder ──────────────────────────────────────────────────────
-BM_FOLDER_ID = None  # TODO: create in Hevy
+BM_FOLDER_ID = 2653107
 
 # ── Hevy Routine IDs (one per day, created later) ────────────────────
 DAY_ROUTINE_MAP = {
-    1: "",  # BM D1 Squat
-    2: "",  # BM D2 Bench
-    3: "",  # BM D3 Deadlift
-    4: "",  # BM D4 Press
-    5: "",  # BM D5 Row
+    1: "322fe8c0-8e7e-4d71-bc8d-0fb19450f1fc",  # BM D1 Squat / RDL
+    2: "a43f6dbf-1ee3-4f46-87e7-1fe01f2b4749",  # BM D2 Bench / BTN Press
+    3: "b508ec84-ff21-4dc2-bc54-6516adab4237",  # BM D3 Deadlift / Box Squat
+    4: "55852c04-1f11-4419-9d89-addc8e0004b9",  # BM D4 Press / CG Bench
+    5: "223f783f-04d2-441e-bb53-e3875dd96244",  # BM D5 Row / Seal Row
 }
 
 # ── Day Configuration ────────────────────────────────────────────────
