@@ -1,147 +1,126 @@
 """
-Baby Mastiff — Analytics & Autoprogression
+Bullmastiff — Analytics & Autoprogression
 
-Fetch workouts from Hevy, detect waves, evaluate AMRAP performance,
-compute next wave's weights, and update Hevy routines.
+Phases: Base (3 waves × 3 weeks) + Peak (3 waves × 3 weeks) = 18 weeks.
+Progression:
+  Main:      1% of 1RM per rep above baseline on the AMRAP set.
+  Variation: step loading (sets +1/week within wave, reset on new wave).
+  Accessories: step loading (sets +1/week, 2 sub-waves cycling).
 
-Wave Structure (per lift):
-  Wave N = 3 sessions at same weight
-    Session 1: 3x6+ (AMRAP last set)
-    Session 2: 4x6+ (AMRAP last set)
-    Session 3: 5x6+ (AMRAP last set)
-  After session 3: evaluate week-3 AMRAP → determine weight change
-
-2nd Lifts:
-  Same wave structure but 3/4/5 x10 straight sets (no AMRAP).
-  Always standard increment after each wave.
+Update flow: fetch workouts → detect position → build exercises → PUT routines.
 """
-import os
-import time
-import urllib.request
-import json
+import os, time, json, urllib.request
 from datetime import datetime
 
 import pandas as pd
-import numpy as np
 
 from src.config import (
-    EXERCISE_DB, TID_TO_LIFT, LIFT_TO_TID, MAIN_LIFTS, SECOND_LIFTS,
-    DAY_CONFIG, DAY_ROUTINE_MAP, BODYWEIGHT, STRENGTH_STANDARDS,
-    WAVE_SCHEME_MAIN, WAVE_SCHEME_SECOND, LIFT_BODY_PART, INCREMENT,
-    get_increment, classify_amrap, round_to_plate, CONFIG_KEY_TO_TID,
+    DAY_CONFIG, DAY_ROUTINE_MAP, LIFT_TO_TID, TID_TO_LIFT,
+    ONE_RM, BASE_MAIN, PEAK_MAIN, BASE_VAR, PEAK_VAR,
+    MAIN_LIFTS, VAR_LIFTS, MAIN_TO_VAR, BODYWEIGHT, STRENGTH_STANDARDS,
+    round_to_plate, get_variation_1rm, get_acc_prescription,
 )
 
 HEVY_API_KEY = os.environ.get("HEVY_API_KEY", "")
-HEVY_BASE = "https://api.hevyapp.com/v1"
+HEVY_BASE    = "https://api.hevyapp.com/v1"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  HEVY CLIENT
+# ═══════════════════════════════════════════════════════════════════════
+
+def _hevy_get(endpoint: str) -> dict:
+    time.sleep(0.35)
+    req = urllib.request.Request(
+        f"{HEVY_BASE}{endpoint}", headers={"api-key": HEVY_API_KEY})
+    return json.loads(urllib.request.urlopen(req).read().decode())
+
+
+def _hevy_put(endpoint: str, body: dict) -> dict:
+    time.sleep(0.35)
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{HEVY_BASE}{endpoint}", data=data, method="PUT",
+        headers={"api-key": HEVY_API_KEY, "Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req).read().decode())
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════════
 
-def _hevy_get(endpoint: str) -> dict:
-    """GET request to Hevy API with rate limiting."""
-    time.sleep(0.35)
-    url = f"{HEVY_BASE}{endpoint}"
-    req = urllib.request.Request(url, headers={"api-key": HEVY_API_KEY})
-    resp = urllib.request.urlopen(req)
-    return json.loads(resp.read().decode())
-
-
-def fetch_bm_workouts() -> list[dict]:
-    """Fetch all Baby Mastiff workouts (matched by title prefix 'BM D')."""
-    all_workouts = []
-    page = 1
+def fetch_bull_workouts() -> list[dict]:
+    """Fetch all Bullmastiff workouts (title starts with 'BULL D')."""
+    all_wks, page = [], 1
     while True:
         data = _hevy_get(f"/workouts?page={page}&pageSize=10")
-        wks = data.get("workouts", [])
+        wks  = data.get("workouts", [])
         if not wks:
             break
         for w in wks:
-            title = w.get("title", "")
-            if title.startswith("BM D") or title.startswith("Baby Mastiff"):
-                all_workouts.append(w)
+            if w.get("title", "").startswith("BULL D"):
+                all_wks.append(w)
         if page >= data.get("page_count", 1):
             break
         page += 1
-    return all_workouts
+    return all_wks
 
 
 def workouts_to_dataframe(workouts: list[dict]) -> pd.DataFrame:
-    """Convert raw Hevy workouts to flat DataFrame. One row per exercise."""
+    """Flatten raw Hevy workouts into one row per exercise per session."""
     rows = []
     for w in workouts:
-        date = w["start_time"][:10]
+        date  = w["start_time"][:10]
         title = w["title"]
         hevy_id = w["id"]
 
-        # Extract day number from title (e.g. "BM D1 Squat / RDL")
-        day_num = _extract_day_num(title)
+        import re
+        m = re.search(r"D(\d)", title)
+        day_num = int(m.group(1)) if m else None
 
         start = datetime.fromisoformat(w["start_time"].replace("Z", "+00:00"))
-        end = datetime.fromisoformat(w["end_time"].replace("Z", "+00:00"))
-        duration_min = round((end - start).total_seconds() / 60)
-        description = w.get("description", "") or ""
+        end   = datetime.fromisoformat(w["end_time"].replace("Z", "+00:00"))
+        dur   = round((end - start).total_seconds() / 60)
 
         for ex in w.get("exercises", []):
-            tid = ex.get("exercise_template_id", "")
-            sets = ex.get("sets", [])
-            working = [s for s in sets if s.get("type") in
-                        ("normal", "failure", "dropset", None)]
-            if not working:
-                working = sets
+            tid  = ex.get("exercise_template_id", "")
+            sets = [s for s in ex.get("sets", [])
+                    if s.get("type") in ("normal", "failure", None)]
+            if not sets:
+                sets = ex.get("sets", [])
 
-            reps_list = [s.get("reps", 0) or 0 for s in working]
-            weights = [s.get("weight_kg", 0) or 0 for s in working]
-            volume = sum(wt * r for wt, r in zip(weights, reps_list))
+            weights   = [s.get("weight_kg", 0) or 0 for s in sets]
+            reps_list = [s.get("reps", 0)       or 0 for s in sets]
+            volume    = sum(w_ * r for w_, r in zip(weights, reps_list))
 
             max_w = max(weights) if weights else 0
-            reps_at_max = [r for wt, r in zip(weights, reps_list) if wt == max_w]
-            max_r = max(reps_at_max) if reps_at_max else 0
+            max_r = max((r for w_, r in zip(weights, reps_list) if w_ == max_w), default=0)
+            e1rm  = round(max_w * (1 + max_r / 30), 1) if max_w > 0 and max_r > 1 else max_w
 
-            # Epley e1RM
-            if max_w > 0 and max_r > 0:
-                e1rm = round(max_w * (1 + max_r / 30), 1) if max_r > 1 else max_w
-            else:
-                e1rm = 0
+            lift_key = TID_TO_LIFT.get(tid, "")
+            role = ("main" if lift_key in MAIN_LIFTS
+                    else "variation" if lift_key in VAR_LIFTS
+                    else "accessory")
 
-            # Identify role from config
-            ex_info = EXERCISE_DB.get(tid, {})
-            role = ex_info.get("role", "unknown")
-            lift_key = ex_info.get("lift_key", "")
-
-            # Detect AMRAP: last set with significantly more reps than prescribed
-            is_amrap_set = False
-            amrap_reps = 0
-            if role == "main" and len(reps_list) >= 3:
-                # Last set is the AMRAP — it's always the last one
-                amrap_reps = reps_list[-1]
-                # Consider it AMRAP if last set ≥ 6 reps (minimum target)
-                is_amrap_set = amrap_reps >= 6
+            amrap_reps = reps_list[-1] if role == "main" and len(reps_list) >= 1 else None
 
             rows.append({
-                "date": pd.Timestamp(date),
-                "hevy_id": hevy_id,
-                "workout_title": title,
-                "day_num": day_num,
-                "day_name": DAY_CONFIG.get(day_num, {}).get("name", title),
-                "duration_min": duration_min,
-                "description": description,
-                "exercise": ex["title"],
-                "exercise_template_id": tid,
-                "role": role,
-                "lift_key": lift_key,
-                "n_sets": len(working),
-                "reps_list": reps_list,
-                "reps_str": ",".join(str(r) for r in reps_list),
-                "total_reps": sum(reps_list),
+                "date":       pd.Timestamp(date),
+                "hevy_id":    hevy_id,
+                "title":      title,
+                "day_num":    day_num,
+                "duration_min": dur,
+                "exercise":   ex.get("title", ""),
+                "tid":        tid,
+                "lift_key":   lift_key,
+                "role":       role,
+                "n_sets":     len(sets),
+                "reps_list":  reps_list,
                 "max_weight": max_w,
-                "max_reps_at_max": max_r,
-                "volume_kg": volume,
-                "e1rm": e1rm,
-                "top_set": f"{max_w}kg x {max_r}" if max_w > 0 else f"BW x {max_r}",
-                "is_bodyweight": max_w == 0,
-                "amrap_reps": amrap_reps if is_amrap_set else None,
+                "max_reps":   max_r,
+                "volume":     volume,
+                "e1rm":       e1rm,
+                "amrap_reps": amrap_reps,
             })
 
     df = pd.DataFrame(rows)
@@ -150,257 +129,257 @@ def workouts_to_dataframe(workouts: list[dict]) -> pd.DataFrame:
     return df
 
 
-def _extract_day_num(title: str) -> int | None:
-    """Extract day number from workout title."""
-    import re
-    m = re.search(r"D(\d)", title)
-    return int(m.group(1)) if m else None
+# ═══════════════════════════════════════════════════════════════════════
+#  PLAN POSITION
+# ═══════════════════════════════════════════════════════════════════════
+
+def get_plan_position(df: pd.DataFrame) -> dict:
+    """
+    Determine current phase/wave/week from completed sessions per lift.
+
+    Returns:
+        {
+            "squat": {"phase": "base", "wave": 1, "week": 2,
+                      "sessions_done": 2, "wave_sessions": 2},
+            ...
+        }
+    3 weeks per wave, 3 waves per phase = 9 sessions per phase per lift.
+    Sessions are counted per-lift (each day = 1 session for that lift).
+    """
+    positions = {}
+    for main_key in MAIN_LIFTS:
+        if df.empty:
+            n = 0
+        else:
+            n = df[(df["lift_key"] == main_key) & (df["role"] == "main")]["hevy_id"].nunique()
+
+        # 9 sessions per phase (3 waves × 3 weeks)
+        if n < 9:
+            phase = "base"
+            wave  = (n // 3) + 1
+            week  = (n % 3) + 1
+        else:
+            peak_n = n - 9
+            phase  = "peak"
+            wave   = (peak_n // 3) + 1
+            week   = (peak_n % 3) + 1
+            if wave > 3:
+                wave, week = 3, 3   # clamp at peak wave 3 week 3
+
+        positions[main_key] = {
+            "phase":          phase,
+            "wave":           wave,
+            "week":           week,
+            "sessions_done":  n,
+            "wave_sessions":  n % 3 if n > 0 else 0,
+        }
+    return positions
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  WAVE DETECTION & PROGRESSION
+#  WEIGHT COMPUTATION
 # ═══════════════════════════════════════════════════════════════════════
 
-def detect_waves(df: pd.DataFrame) -> dict:
+def compute_main_weight(lift_key: str, df: pd.DataFrame,
+                        phase: str, wave: int) -> float:
     """
-    Analyze workout history and detect wave state for each lift.
+    Current working weight for a main lift.
 
-    Returns dict keyed by lift_key:
-    {
-        "squat": {
-            "wave": 3,
-            "week_in_wave": 2,   # 1-3
-            "current_weight": 60,
-            "sessions": [...],
-            "amrap_history": [...],
-            "last_amrap": 14,
-            "classification": "ADVANCE",
-            "next_weight": 62,
-            "next_increment": 2,
-        }, ...
-    }
+    Logic:
+    - Start of program: prescribed % × 1RM.
+    - Each week: weight increases by (amrap_reps_above_baseline × 1% of 1RM).
+      Accumulated over the wave until reset at new wave start.
     """
-    result = {}
+    one_rm = ONE_RM[lift_key]
+    pct_map = BASE_MAIN if phase == "base" else PEAK_MAIN
+    baseline_reps = pct_map[wave]["reps"]
+    start_pct     = pct_map[wave]["pct"]
+    start_w       = round_to_plate(one_rm * start_pct)
 
     if df.empty:
-        for tid, ex in {**MAIN_LIFTS, **SECOND_LIFTS}.items():
-            result[ex["lift_key"]] = _empty_wave_state(ex["lift_key"], ex["role"])
-        return result
+        return start_w
 
-    for config_key, ex in {**MAIN_LIFTS, **SECOND_LIFTS}.items():
-        lift_key = ex["lift_key"]
-        role = ex["role"]
-        tid = CONFIG_KEY_TO_TID[config_key]
+    main_df = (df[(df["lift_key"] == lift_key) & (df["role"] == "main")]
+               .sort_values("date").reset_index(drop=True))
+    if main_df.empty:
+        return start_w
 
-        # Get all sessions for this lift, chronological
-        lift_df = df[df["exercise_template_id"] == tid].copy()
-        if lift_df.empty:
-            result[lift_key] = _empty_wave_state(lift_key, role)
+    # Sessions in current phase+wave
+    phase_offset = 0 if phase == "base" else 9
+    wave_offset  = phase_offset + (wave - 1) * 3
+    # All sessions from wave_offset onward
+    wave_sessions = main_df.iloc[wave_offset:]
+
+    # Accumulate weight from start_w, adding 1%1RM per extra rep each week
+    w = start_w
+    for _, row in wave_sessions.iterrows():
+        amrap = row["amrap_reps"]
+        if amrap is None:
             continue
+        extra = max(0, int(amrap) - baseline_reps)
+        increment = round_to_plate(extra * one_rm * 0.01)
+        w = round_to_plate(w + increment)
 
-        lift_df = lift_df.sort_values("date").reset_index(drop=True)
-
-        # Group by weight to find waves (wave = consecutive sessions at same weight)
-        sessions = []
-        for _, row in lift_df.iterrows():
-            sessions.append({
-                "date": row["date"],
-                "weight": row["max_weight"],
-                "n_sets": row["n_sets"],
-                "reps_list": row["reps_list"],
-                "amrap_reps": row.get("amrap_reps"),
-                "e1rm": row["e1rm"],
-                "hevy_id": row["hevy_id"],
-            })
-
-        # Current wave: sessions at the same weight at the end
-        current_weight = sessions[-1]["weight"]
-        current_wave_sessions = []
-        for s in reversed(sessions):
-            if s["weight"] == current_weight:
-                current_wave_sessions.insert(0, s)
-            else:
-                break
-
-        week_in_wave = len(current_wave_sessions)
-
-        # Count total waves (weight changes = wave transitions)
-        wave_count = 1
-        prev_w = sessions[0]["weight"] if sessions else 0
-        for s in sessions[1:]:
-            if s["weight"] != prev_w:
-                wave_count += 1
-                prev_w = s["weight"]
-
-        # AMRAP analysis (main lifts only)
-        amrap_history = []
-        last_amrap = None
-        classification = None
-        next_increment = 0
-        next_weight = current_weight
-
-        if role == "main":
-            amrap_history = [
-                {"date": s["date"], "weight": s["weight"],
-                 "reps": s["amrap_reps"], "week": i + 1}
-                for i, s in enumerate(current_wave_sessions)
-                if s["amrap_reps"] is not None
-            ]
-            if current_wave_sessions:
-                last_amrap = current_wave_sessions[-1].get("amrap_reps")
-
-            # If wave is complete (3 sessions), classify and compute next
-            if week_in_wave >= 3 and last_amrap is not None:
-                classification = classify_amrap(last_amrap)
-                next_increment = get_increment(lift_key, last_amrap)
-                next_weight = round_to_plate(current_weight + next_increment)
-        else:
-            # 2nd lifts: always standard increment after 3 sessions
-            if week_in_wave >= 3:
-                next_increment = get_increment(lift_key, None)
-                next_weight = round_to_plate(current_weight + next_increment)
-                classification = "STANDARD"
-
-        result[lift_key] = {
-            "wave": wave_count,
-            "week_in_wave": min(week_in_wave, 3),
-            "current_weight": current_weight,
-            "sessions": current_wave_sessions,
-            "amrap_history": amrap_history,
-            "last_amrap": last_amrap,
-            "classification": classification,
-            "next_weight": next_weight,
-            "next_increment": next_increment,
-            "total_sessions": len(sessions),
-            "role": role,
-        }
-
-    return result
+    return w
 
 
-def _empty_wave_state(lift_key: str, role: str) -> dict:
-    return {
-        "wave": 0, "week_in_wave": 0, "current_weight": 0,
-        "sessions": [], "amrap_history": [], "last_amrap": None,
-        "classification": None, "next_weight": 0, "next_increment": 0,
-        "total_sessions": 0, "role": role,
+def compute_variation_weight(main_key: str, var_key: str,
+                              df: pd.DataFrame, phase: str, wave: int) -> float:
+    """
+    Variation weight. Fixed within a wave (based on variation 1RM).
+    Increases by standard increment on new wave.
+    """
+    var_1rm = get_variation_1rm(main_key)
+    pct_map = BASE_VAR if phase == "base" else PEAK_VAR
+    pct     = pct_map[wave]["pct"]
+    w       = round_to_plate(var_1rm * pct)
+
+    # Override with last recorded variation weight if available
+    if not df.empty:
+        var_df = (df[(df["lift_key"] == var_key) & (df["role"] == "variation")]
+                  .sort_values("date"))
+        if not var_df.empty:
+            # Use last actual weight (variation weight is constant within wave,
+            # we only update at wave transitions via this function)
+            w = var_df["max_weight"].iloc[-1]
+
+    return w
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  ROUTINE BUILDER
+# ═══════════════════════════════════════════════════════════════════════
+
+def _normal_sets(weight: float, n: int, reps: int) -> list[dict]:
+    return [{"type": "normal", "weight_kg": float(weight), "reps": reps}
+            for _ in range(n)]
+
+
+def _acc_sets(n: int, reps: int) -> list[dict]:
+    return [{"type": "normal", "weight_kg": 0.0, "reps": reps}
+            for _ in range(n)]
+
+
+def build_routine_exercises(day_num: int, df: pd.DataFrame,
+                             positions: dict) -> list[dict]:
+    """
+    Build Hevy exercise list for one routine.
+
+    Main + variation weights computed from history + progression rules.
+    Accessories use step loading sets (weight = 0, fill in manually).
+    """
+    cfg      = DAY_CONFIG[day_num]
+    main_key = cfg["main_key"]
+    var_key  = cfg["var_key"]
+    pos      = positions[main_key]
+    phase, wave, week = pos["phase"], pos["wave"], pos["week"]
+
+    # ── Main lift ────────────────────────────────────────────────────
+    main_w = compute_main_weight(main_key, df, phase, wave)
+    pct_map = BASE_MAIN if phase == "base" else PEAK_MAIN
+    baseline_reps = pct_map[wave]["reps"]
+
+    if phase == "base":
+        n_main_sets = 4
+    else:  # peak: sets decrease by week
+        n_main_sets = PEAK_MAIN[wave]["sets_by_week"][week]
+
+    phase_tag = f"{phase.capitalize()} W{wave} W{week}"
+    main_ex = {
+        "exercise_template_id": LIFT_TO_TID[main_key],
+        "superset_id": None,
+        "rest_seconds": 300 if main_key == "deadlift" else 240,
+        "notes": f"{n_main_sets}x{baseline_reps}+ | AMRAP last | +1%1RM/rep | {phase_tag}",
+        "sets": _normal_sets(main_w, n_main_sets, baseline_reps),
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  HEVY ROUTINE UPDATES
-# ═══════════════════════════════════════════════════════════════════════
-
-def build_routine_exercises(day_num: int, waves: dict) -> list[dict]:
-    """Build Hevy routine exercise list for a given day."""
-    day_cfg = DAY_CONFIG[day_num]
-    main_key = day_cfg["main_key"]
-    second_key = day_cfg["second_key"]
-    main_tid = LIFT_TO_TID[main_key]
-    second_tid = LIFT_TO_TID[second_key]
-
-    main_wave = waves.get(main_key, _empty_wave_state(main_key, "main"))
-    second_wave = waves.get(second_key, _empty_wave_state(second_key, "second"))
-
-    exercises = []
-
-    # ── Main Lift ────────────────────────────────────────────
-    main_weight = main_wave["current_weight"]
-    # If wave complete, use next_weight
-    if main_wave["week_in_wave"] >= 3:
-        main_weight = main_wave["next_weight"]
-        next_week = 1
+    # ── Variation ────────────────────────────────────────────────────
+    var_w = compute_variation_weight(main_key, var_key, df, phase, wave)
+    if phase == "base":
+        var_reps    = BASE_VAR[wave]["reps"]
+        var_n_sets  = week + 2   # week1→3, week2→4, week3→5
+        var_note    = f"{var_n_sets}x{var_reps} @{int(BASE_VAR[wave]['pct']*100)}% | step loading"
     else:
-        next_week = main_wave["week_in_wave"] + 1
+        var_reps   = PEAK_VAR[wave]["reps"]
+        var_n_sets = PEAK_VAR[wave]["sets_by_week"][week]
+        var_note   = f"{var_n_sets}x{var_reps} @{int(PEAK_VAR[wave]['pct']*100)}% | sets decrease"
 
-    scheme = WAVE_SCHEME_MAIN.get(min(next_week, 3), WAVE_SCHEME_MAIN[1])
-    main_sets = _build_main_sets(main_weight, scheme["sets"], scheme["reps"])
-    exercises.append({
-        "exercise_template_id": main_tid,
-        "superset_id": None,
-        "rest_seconds": 180,
-        "notes": f"Wave {main_wave['wave']} W{next_week} — AMRAP last set",
-        "sets": main_sets,
-    })
-
-    # ── 2nd Lift ─────────────────────────────────────────────
-    second_weight = second_wave["current_weight"]
-    if second_wave["week_in_wave"] >= 3:
-        second_weight = second_wave["next_weight"]
-        s_week = 1
-    else:
-        s_week = second_wave["week_in_wave"] + 1
-
-    s_scheme = WAVE_SCHEME_SECOND.get(min(s_week, 3), WAVE_SCHEME_SECOND[1])
-    second_sets = _build_second_sets(second_weight, s_scheme["sets"], s_scheme["reps"])
-    exercises.append({
-        "exercise_template_id": second_tid,
+    var_ex = {
+        "exercise_template_id": LIFT_TO_TID[var_key],
         "superset_id": None,
         "rest_seconds": 120,
-        "notes": f"Straight sets — controlled tempo",
-        "sets": second_sets,
-    })
+        "notes": var_note,
+        "sets": _normal_sets(var_w, var_n_sets, var_reps),
+    }
 
-    # ── Accessories ──────────────────────────────────────────
-    for config_key, ex in EXERCISE_DB.items():
-        if ex["day"] == day_num and ex["role"] == "accessory":
-            real_tid = CONFIG_KEY_TO_TID[config_key]
-            exercises.append({
-                "exercise_template_id": real_tid,
-                "superset_id": None,
-                "rest_seconds": 90,
-                "notes": "3-4 x 10-15",
-                "sets": _build_accessory_sets(),
-            })
+    # ── Accessories ──────────────────────────────────────────────────
+    acc_presc = get_acc_prescription(phase, wave, week)
+    exercises = [main_ex, var_ex]
+
+    for acc_key in cfg["acc_A"]:
+        if acc_key not in LIFT_TO_TID:
+            continue
+        n, r = acc_presc["A"]["sets"], acc_presc["A"]["reps"]
+        exercises.append({
+            "exercise_template_id": LIFT_TO_TID[acc_key],
+            "superset_id": None,
+            "rest_seconds": 90,
+            "notes": f"A | {n}x{r} (step loading)",
+            "sets": _acc_sets(n, r),
+        })
+
+    for acc_key in cfg["acc_B"]:
+        if acc_key not in LIFT_TO_TID:
+            continue
+        n, r = acc_presc["B"]["sets"], acc_presc["B"]["reps"]
+        exercises.append({
+            "exercise_template_id": LIFT_TO_TID[acc_key],
+            "superset_id": None,
+            "rest_seconds": 60,
+            "notes": f"B | {n}x{r} (step loading)",
+            "sets": _acc_sets(n, r),
+        })
 
     return exercises
 
 
-def _build_main_sets(weight: float, n_sets: int, reps: int) -> list[dict]:
-    """Build main lift sets for Hevy routine. Last set is AMRAP target."""
-    sets = []
-    for i in range(n_sets):
-        sets.append({
-            "type": "normal",
-            "weight_kg": weight,
-            "reps": reps,
-        })
-    return sets
-
-
-def _build_second_sets(weight: float, n_sets: int, reps: int) -> list[dict]:
-    return [{"type": "normal", "weight_kg": weight, "reps": reps}
-            for _ in range(n_sets)]
-
-
-def _build_accessory_sets(n_sets: int = 3, reps: int = 12) -> list[dict]:
-    return [{"type": "normal", "weight_kg": 0, "reps": reps}
-            for _ in range(n_sets)]
+def _routine_title(day_num: int, positions: dict) -> str:
+    main_key = DAY_CONFIG[day_num]["main_key"]
+    pos = positions[main_key]
+    day_name = DAY_CONFIG[day_num]["name"]
+    return (f"BULL D{day_num} — {day_name} "
+            f"[{pos['phase'].capitalize()} W{pos['wave']} W{pos['week']}]")
 
 
 def update_hevy_routines(df: pd.DataFrame) -> dict:
-    """Detect waves from data and update all Hevy routines."""
-    waves = detect_waves(df)
-    results = {}
+    """Detect position from df, rebuild all 4 routines, PUT to Hevy."""
+    positions = get_plan_position(df)
+    results   = {}
 
     for day_num, routine_id in DAY_ROUTINE_MAP.items():
-        if not routine_id:
-            results[day_num] = {"status": "skipped", "reason": "no routine_id"}
-            continue
+        exercises = build_routine_exercises(day_num, df, positions)
+        title     = _routine_title(day_num, positions)
 
-        exercises = build_routine_exercises(day_num, waves)
-        payload = {"routine": {"exercises": exercises}}
-
+        # GET current routine to preserve manual exercise additions
         try:
-            url = f"{HEVY_BASE}/routines/{routine_id}"
-            data = json.dumps(payload).encode()
-            req = urllib.request.Request(
-                url, data=data, method="PUT",
-                headers={"api-key": HEVY_API_KEY, "Content-Type": "application/json"},
-            )
-            time.sleep(0.35)
-            resp = urllib.request.urlopen(req)
-            results[day_num] = {"status": "updated", "code": resp.status}
+            current = _hevy_get(f"/routines/{routine_id}")
+            curr_exs = current["routine"][0]["exercises"]
+            managed_tids = {e["exercise_template_id"] for e in exercises}
+            manual = [e for e in curr_exs
+                      if e.get("exercise_template_id") not in managed_tids]
+            # Strip index fields before PUT
+            for e in manual:
+                e.pop("index", None)
+                for s in e.get("sets", []):
+                    s.pop("index", None)
+            exercises = exercises + manual
+        except Exception:
+            pass  # proceed without manual preservation
+
+        payload = {"routine": {"title": title, "notes": "", "exercises": exercises}}
+        try:
+            _hevy_put(f"/routines/{routine_id}", payload)
+            results[day_num] = {"status": "updated", "title": title}
         except Exception as e:
             results[day_num] = {"status": "error", "error": str(e)}
 
@@ -408,109 +387,140 @@ def update_hevy_routines(df: pd.DataFrame) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  SUMMARIES & ANALYTICS
+#  PROGRESSION PREVIEW (for dashboard / "Hoy te toca")
 # ═══════════════════════════════════════════════════════════════════════
 
-def global_summary(df: pd.DataFrame) -> dict:
-    """High-level program summary."""
-    if df.empty:
-        return {}
+def next_session_plan(df: pd.DataFrame, day_num: int) -> dict:
+    """
+    Preview what the next session should look like for a given day.
+    Returns weights, sets, reps for main + variation + accessories.
+    """
+    positions = get_plan_position(df)
+    main_key  = DAY_CONFIG[day_num]["main_key"]
+    var_key   = DAY_CONFIG[day_num]["var_key"]
+    pos       = positions[main_key]
+    phase, wave, week = pos["phase"], pos["wave"], pos["week"]
 
-    waves = detect_waves(df)
-    total_sessions = df["hevy_id"].nunique()
-    total_volume = df["volume_kg"].sum()
-    date_range = (df["date"].min(), df["date"].max())
-    weeks = max(1, (date_range[1] - date_range[0]).days // 7)
+    main_w = compute_main_weight(main_key, df, phase, wave)
+    var_w  = compute_variation_weight(main_key, var_key, df, phase, wave)
 
-    # Per-lift summaries
-    lift_summaries = {}
-    for lift_key, state in waves.items():
-        if state["role"] != "main":
-            continue
-        lift_summaries[lift_key] = {
-            "current_weight": state["current_weight"],
-            "wave": state["wave"],
-            "week_in_wave": state["week_in_wave"],
-            "last_amrap": state["last_amrap"],
-            "classification": state["classification"],
-            "next_weight": state["next_weight"],
-            "total_sessions": state["total_sessions"],
-        }
+    pct_map       = BASE_MAIN if phase == "base" else PEAK_MAIN
+    baseline_reps = pct_map[wave]["reps"]
+
+    if phase == "base":
+        n_main = 4
+    else:
+        n_main = PEAK_MAIN[wave]["sets_by_week"].get(week, 1)
+
+    var_reps  = (BASE_VAR[wave]["reps"] if phase == "base"
+                 else PEAK_VAR[wave]["reps"])
+    var_sets  = ((week + 2) if phase == "base"
+                 else PEAK_VAR[wave]["sets_by_week"].get(week, 2))
+
+    acc = get_acc_prescription(phase, wave, week)
 
     return {
-        "total_sessions": total_sessions,
-        "total_volume": round(total_volume),
-        "weeks": weeks,
-        "avg_sessions_per_week": round(total_sessions / weeks, 1),
-        "date_range": date_range,
-        "lift_summaries": lift_summaries,
-        "waves": waves,
+        "day_num":  day_num,
+        "day_name": DAY_CONFIG[day_num]["name"],
+        "phase":    phase,
+        "wave":     wave,
+        "week":     week,
+        "main": {
+            "lift_key": main_key,
+            "weight":   main_w,
+            "sets":     n_main,
+            "reps":     baseline_reps,
+            "note":     "AMRAP last set",
+        },
+        "variation": {
+            "lift_key": var_key,
+            "weight":   var_w,
+            "sets":     var_sets,
+            "reps":     var_reps,
+            "note":     "Step loading",
+        },
+        "accessories": acc,
     }
 
 
-def pr_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Build PR table for all tracked lifts."""
+def amrap_classification(reps: int, baseline: int) -> tuple[str, str]:
+    """
+    Classify AMRAP performance and compute weight jump for next session.
+    Returns (category, description).
+
+    +1% 1RM per rep above baseline. Fractional increments rounded to plate.
+    """
+    extra = reps - baseline
+    if extra <= 0:
+        return "GRIND", f"No jump — repeat weight"
+    cat   = "SURGE" if extra >= 5 else "ADVANCE"
+    return cat, f"+{extra} extra reps"
+
+
+def weight_jump_from_amrap(lift_key: str, amrap_reps: int,
+                            baseline_reps: int) -> float:
+    """
+    How much weight to add after an AMRAP set.
+    Formula: extra_reps × (1RM × 1%) rounded to nearest 2kg.
+    """
+    extra     = max(0, amrap_reps - baseline_reps)
+    increment = extra * ONE_RM[lift_key] * 0.01
+    return round_to_plate(increment)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  ANALYTICS SUMMARIES
+# ═══════════════════════════════════════════════════════════════════════
+
+def lift_progression(df: pd.DataFrame) -> pd.DataFrame:
+    """Session-by-session weight + e1RM timeline for main lifts."""
     if df.empty:
         return pd.DataFrame()
+    return (
+        df[df["role"] == "main"]
+        .groupby(["date", "lift_key"])
+        .agg(weight=("max_weight", "max"), e1rm=("e1rm", "max"),
+             amrap=("amrap_reps", "first"), n_sets=("n_sets", "first"))
+        .reset_index()
+        .sort_values(["lift_key", "date"])
+    )
 
-    tracked = df[df["role"].isin(["main", "second"])].copy()
+
+def pr_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Best e1RM per lift with strength level classification."""
+    if df.empty:
+        return pd.DataFrame()
+    tracked = df[df["role"].isin(["main", "variation"])]
     if tracked.empty:
         return pd.DataFrame()
-
-    prs = (
-        tracked.groupby("lift_key")
-        .agg(
-            best_e1rm=("e1rm", "max"),
-            best_weight=("max_weight", "max"),
-            best_reps=("max_reps_at_max", "max"),
-            sessions=("hevy_id", "nunique"),
-        )
-        .reset_index()
-    )
-
-    # Add strength level
+    prs = (tracked.groupby("lift_key")
+           .agg(best_e1rm=("e1rm","max"), best_weight=("max_weight","max"),
+                sessions=("hevy_id","nunique"))
+           .reset_index())
     prs["level"] = prs.apply(
-        lambda r: _strength_level(r["lift_key"], r["best_e1rm"]), axis=1
-    )
-
+        lambda r: _strength_level(r["lift_key"], r["best_e1rm"]), axis=1)
     return prs.sort_values("best_e1rm", ascending=False)
 
 
 def _strength_level(lift_key: str, e1rm: float) -> str:
-    """Classify lift level based on strength standards."""
-    standards = STRENGTH_STANDARDS.get(lift_key)
-    if not standards:
+    std = STRENGTH_STANDARDS.get(lift_key)
+    if not std:
         return "—"
     ratio = e1rm / BODYWEIGHT
-    if ratio >= standards["elite"]:
-        return "Elite"
-    elif ratio >= standards["advanced"]:
-        return "Advanced"
-    elif ratio >= standards["intermediate"]:
-        return "Intermediate"
-    elif ratio >= standards["beginner"]:
-        return "Beginner"
+    for lvl in ("elite", "advanced", "intermediate", "beginner"):
+        if ratio >= std[lvl]:
+            return lvl.capitalize()
     return "Untrained"
 
 
-def lift_progression(df: pd.DataFrame) -> pd.DataFrame:
-    """Build progression timeline for all main lifts."""
+def global_summary(df: pd.DataFrame) -> dict:
     if df.empty:
-        return pd.DataFrame()
-
-    main_df = df[df["role"] == "main"].copy()
-    if main_df.empty:
-        return pd.DataFrame()
-
-    return (
-        main_df.groupby(["date", "lift_key"])
-        .agg(
-            weight=("max_weight", "max"),
-            e1rm=("e1rm", "max"),
-            amrap=("amrap_reps", "first"),
-            n_sets=("n_sets", "first"),
-            volume=("volume_kg", "sum"),
-        )
-        .reset_index()
-        .sort_values(["lift_key", "date"])
-    )
+        return {}
+    total_sessions = df["hevy_id"].nunique()
+    positions = get_plan_position(df)
+    return {
+        "total_sessions": total_sessions,
+        "total_volume":   round(df["volume"].sum()),
+        "positions":      positions,
+        "prs":            pr_table(df).to_dict("records") if not df.empty else [],
+    }

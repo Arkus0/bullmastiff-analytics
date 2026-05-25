@@ -1,94 +1,142 @@
-"""Tests for Baby Mastiff progression logic."""
+"""Tests for Bullmastiff progression logic."""
 import pytest
-from src.config import get_increment, classify_amrap, round_to_plate
-
-
-class TestClassifyAmrap:
-    def test_surge(self):
-        assert classify_amrap(15) == "SURGE"
-        assert classify_amrap(20) == "SURGE"
-
-    def test_advance(self):
-        assert classify_amrap(12) == "ADVANCE"
-        assert classify_amrap(14) == "ADVANCE"
-
-    def test_grind(self):
-        assert classify_amrap(9) == "GRIND"
-        assert classify_amrap(11) == "GRIND"
-
-    def test_stall(self):
-        assert classify_amrap(8) == "STALL"
-        assert classify_amrap(6) == "STALL"
-
-
-class TestGetIncrement:
-    def test_upper_surge(self):
-        assert get_increment("bench", 16) == 4.0  # 2 * 2
-
-    def test_upper_advance(self):
-        assert get_increment("bench", 13) == 2.0
-
-    def test_upper_stall(self):
-        assert get_increment("bench", 7) == 0.0
-
-    def test_lower_surge(self):
-        assert get_increment("squat", 15) == 8.0  # 2 * 4
-
-    def test_lower_advance(self):
-        assert get_increment("deadlift", 12) == 4.0
-
-    def test_lower_stall(self):
-        assert get_increment("squat", 8) == 0.0
-
-    def test_second_lift_always_standard(self):
-        assert get_increment("rdl", None) == 4.0
-        assert get_increment("btn_press", None) == 2.0
-        assert get_increment("cg_bench", None) == 2.0
+import pandas as pd
+from src.config import round_to_plate, ONE_RM, get_acc_prescription
+from src.analytics import (
+    get_plan_position, compute_main_weight, weight_jump_from_amrap,
+    amrap_classification, next_session_plan,
+)
 
 
 class TestRoundToPlate:
     def test_exact(self):
-        assert round_to_plate(60) == 60
-
-    def test_round_up(self):
-        assert round_to_plate(61) == 60  # banker's rounding: 30.5 → 30
-
-    def test_round_down(self):
-        assert round_to_plate(63) == 64  # 63/2=31.5 → 32*2=64
-
-    def test_odd(self):
-        assert round_to_plate(59) == 60
+        assert round_to_plate(60) == 60.0
+    def test_round_nearest_2(self):
+        assert round_to_plate(61) == 60.0
+        assert round_to_plate(63) == 64.0
+    def test_float(self):
+        assert round_to_plate(77.0) == 76.0
 
 
-class TestWaveDetection:
-    """Test wave detection with synthetic data."""
+class TestPlanPosition:
+    def _df(self, lift_key, n_sessions):
+        rows = [{"hevy_id": f"s{i}", "lift_key": lift_key, "role": "main",
+                 "amrap_reps": 8, "max_weight": 80.0,
+                 "date": pd.Timestamp(f"2026-0{(i//28)+1}-{(i%28)+1:02d}")}
+                for i in range(n_sessions)]
+        return pd.DataFrame(rows)
 
-    def test_empty_df(self):
-        import pandas as pd
-        from src.analytics import detect_waves
-        df = pd.DataFrame()
-        result = detect_waves(df)
-        # Should return empty states for all lifts
-        assert all(v["total_sessions"] == 0 for v in result.values())
+    def test_empty(self):
+        pos = get_plan_position(pd.DataFrame())
+        for lk in ["squat", "bench", "deadlift", "ohp"]:
+            assert pos[lk]["phase"] == "base"
+            assert pos[lk]["wave"] == 1
+            assert pos[lk]["week"] == 1
 
-    def test_single_session(self):
-        import pandas as pd
-        from src.analytics import detect_waves
+    def test_base_wave2(self):
+        df = self._df("squat", 3)  # 3 sessions → start wave 2
+        pos = get_plan_position(df)
+        assert pos["squat"]["phase"] == "base"
+        assert pos["squat"]["wave"] == 2
+        assert pos["squat"]["week"] == 1
 
-        df = pd.DataFrame([{
-            "date": pd.Timestamp("2026-04-07"),
-            "hevy_id": "test1",
-            "exercise_template_id": "D04AC939",  # back squat
-            "role": "main",
-            "lift_key": "squat",
-            "max_weight": 60,
-            "n_sets": 3,
-            "reps_list": [6, 6, 12],
-            "amrap_reps": 12,
-            "e1rm": 84,
-        }])
+    def test_base_wave1_week2(self):
+        df = self._df("squat", 1)
+        pos = get_plan_position(df)
+        assert pos["squat"]["wave"] == 1
+        assert pos["squat"]["week"] == 2
 
-        waves = detect_waves(df)
-        assert waves["squat"]["wave"] == 1
-        assert waves["squat"]["week_in_wave"] == 1
-        assert waves["squat"]["current_weight"] == 60
+    def test_peak_start(self):
+        df = self._df("squat", 9)
+        pos = get_plan_position(df)
+        assert pos["squat"]["phase"] == "peak"
+        assert pos["squat"]["wave"] == 1
+        assert pos["squat"]["week"] == 1
+
+    def test_lifts_independent(self):
+        # squat has 3 sessions, bench has 0
+        rows = [{"hevy_id": f"s{i}", "lift_key": "squat", "role": "main",
+                 "amrap_reps": 8, "max_weight": 80.0,
+                 "date": pd.Timestamp(f"2026-01-{i+1:02d}")}
+                for i in range(3)]
+        df = pd.DataFrame(rows)
+        pos = get_plan_position(df)
+        assert pos["squat"]["wave"] == 2
+        assert pos["bench"]["wave"] == 1
+
+
+class TestWeightJump:
+    def test_zero_extra(self):
+        assert weight_jump_from_amrap("squat", 6, 6) == 0.0
+
+    def test_5_extra_squat(self):
+        # 5 × (110 × 0.01) = 5.5 → rounded to 6.0
+        assert weight_jump_from_amrap("squat", 11, 6) == pytest.approx(6.0)
+
+    def test_3_extra_bench(self):
+        # 3 × (104 × 0.01) = 3.12 → rounded to 4.0
+        assert weight_jump_from_amrap("bench", 9, 6) == pytest.approx(4.0)
+
+    def test_1_extra_ohp(self):
+        # 1 × (68 × 0.01) = 0.68 → rounded to 0.0 (< 1kg/side)
+        assert weight_jump_from_amrap("ohp", 7, 6) == pytest.approx(0.0)
+
+
+class TestAmrapClassification:
+    def test_surge_5_extra(self):
+        cat, _ = amrap_classification(11, 6)
+        assert cat == "SURGE"
+
+    def test_advance_2_extra(self):
+        cat, _ = amrap_classification(8, 6)
+        assert cat == "ADVANCE"
+
+    def test_grind_no_extra(self):
+        cat, _ = amrap_classification(6, 6)
+        assert cat == "GRIND"
+
+    def test_grind_below_baseline(self):
+        cat, _ = amrap_classification(4, 6)
+        assert cat == "GRIND"
+
+
+class TestAccProgression:
+    def test_base_w1_week1(self):
+        acc = get_acc_prescription("base", 1, 1)
+        assert acc["A"]["sets"] == 2
+        assert acc["A"]["reps"] == 10
+        assert acc["B"]["sets"] == 2
+        assert acc["B"]["reps"] == 15
+
+    def test_base_w1_week3(self):
+        acc = get_acc_prescription("base", 1, 3)
+        assert acc["A"]["sets"] == 4
+        assert acc["B"]["sets"] == 4
+
+    def test_base_w2_subwave2_reps(self):
+        acc = get_acc_prescription("base", 2, 1)
+        assert acc["A"]["reps"] == 8
+        assert acc["B"]["reps"] == 12
+
+    def test_peak_w1_subwave1(self):
+        acc = get_acc_prescription("peak", 1, 1)
+        assert acc["A"]["reps"] == 10   # sub-wave 1 (odd wave)
+        assert acc["B"]["reps"] == 15
+
+
+class TestNextSessionPlan:
+    def test_empty_df_d1(self):
+        plan = next_session_plan(pd.DataFrame(), 1)
+        assert plan["phase"] == "base"
+        assert plan["wave"] == 1
+        assert plan["week"] == 1
+        assert plan["main"]["sets"] == 4
+        assert plan["main"]["reps"] == 6
+        assert plan["main"]["weight"] == round_to_plate(ONE_RM["squat"] * 0.70)
+        assert plan["variation"]["sets"] == 3   # week 1 → 3 sets
+        assert plan["variation"]["reps"] == 12
+
+    def test_empty_df_d3_deadlift(self):
+        plan = next_session_plan(pd.DataFrame(), 3)
+        assert plan["main"]["lift_key"] == "deadlift"
+        assert plan["main"]["weight"] == round_to_plate(ONE_RM["deadlift"] * 0.70)
