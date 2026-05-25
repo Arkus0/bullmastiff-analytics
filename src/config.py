@@ -54,7 +54,7 @@ DAY_CONFIG = {
         "name": "Squat",
         "main_key": "squat",
         "var_key":  "front_squat",
-        "acc_A": ["leg_press",    "cable_row"],
+        "acc_A": ["bulgarian_ss", "cable_row"],
         "acc_B": ["leg_extension","lat_pulldown"],
     },
     2: {
@@ -77,6 +77,15 @@ DAY_CONFIG = {
         "var_key":  "btn_press",
         "acc_A": ["db_shoulder_press","skullcrusher"],
         "acc_B": ["lateral_raise",    "rope_pressdown"],
+    },
+    5: {
+        "name": "Upper Back & Traps",
+        "main_key": None,   # D5 has no % main lift — step loading only
+        "var_key":  None,
+        # A-type: heavier compound/power movements
+        "acc_A": ["sandbag_cp", "meadows_row", "barbell_shrug", "sandbag_carry"],
+        # B-type: lighter, rear delt / upper back health
+        "acc_B": ["face_pull", "y_raise", "sandbag_os", "band_pullaparts"],
     },
 }
 
@@ -162,6 +171,18 @@ LIFT_TO_TID = {
     "skullcrusher":       "875F585F",
     "lateral_raise":      "422B08F1",
     "rope_pressdown":     "94B7239B",
+    # D5: Upper back & traps
+    "meadows_row":        "C732C341",
+    "barbell_shrug":      "0B841777",
+    "sandbag_carry":      "95711844-ad33-4b9e-829d-8ec2d795798a",
+    "sandbag_cp":         "65e31abc-d064-44b8-be50-114ab9ac2e2a",
+    "sandbag_os":         "0f82c18d-f3de-4983-8641-f1b926a07483",
+    "face_pull":          "BE640BA0",
+    "rear_delt_db":       "E5988A0A",
+    "y_raise":            "F21D5693",
+    "band_pullaparts":    "E8D86EE8",
+    # Leg press substitute (home gym)
+    "bulgarian_ss":       "B5D3A742",
 }
 TID_TO_LIFT = {v: k for k, v in LIFT_TO_TID.items()}
 

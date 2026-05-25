@@ -265,10 +265,15 @@ def build_routine_exercises(day_num: int, df: pd.DataFrame,
     """
     Build Hevy exercise list for one routine.
 
-    Main + variation weights computed from history + progression rules.
-    Accessories use step loading sets (weight = 0, fill in manually).
+    D1-D4: percentage-based main + variation + step-loaded accessories.
+    D5:    step-loading only (no % main lift — all treated as accessories).
     """
-    cfg      = DAY_CONFIG[day_num]
+    cfg = DAY_CONFIG[day_num]
+
+    # D5: Upper Back & Traps — no main lift, pure step loading
+    if cfg["main_key"] is None:
+        return _build_d5_exercises(df, positions)
+
     main_key = cfg["main_key"]
     var_key  = cfg["var_key"]
     pos      = positions[main_key]
@@ -349,6 +354,55 @@ def _routine_title(day_num: int, positions: dict) -> str:
     day_name = DAY_CONFIG[day_num]["name"]
     return (f"BULL D{day_num} — {day_name} "
             f"[{pos['phase'].capitalize()} W{pos['wave']} W{pos['week']}]")
+
+
+
+def _build_d5_exercises(df: pd.DataFrame, positions: dict) -> list[dict]:
+    """
+    D5 — Upper Back & Traps: all step-loading.
+    Position is driven by squat (most sessions logged = closest proxy for week).
+    Sets: 3→4→5 per week within wave (same as variation step loading).
+    """
+    # Use squat position as week anchor (Juan trains D1 on Monday)
+    squat_pos = positions.get("squat", {"phase": "base", "wave": 1, "week": 1})
+    phase = squat_pos["phase"]
+    wave  = squat_pos["wave"]
+    week  = squat_pos["week"]
+    n_sets = week + 2  # week1→3, week2→4, week3→5
+
+    acc = get_acc_prescription(phase, wave, week)
+    # For D5 the A/B distinction controls reps
+    phase_tag = f"{phase.capitalize()} W{wave} W{week}"
+    exercises = []
+
+    from src.config import DAY_CONFIG, LIFT_TO_TID
+    cfg = DAY_CONFIG[5]
+
+    for acc_key in cfg["acc_A"]:
+        if acc_key not in LIFT_TO_TID:
+            continue
+        reps = acc["A"]["reps"]
+        exercises.append({
+            "exercise_template_id": LIFT_TO_TID[acc_key],
+            "superset_id": None,
+            "rest_seconds": 120,
+            "notes": f"A | {n_sets}x{reps} | {phase_tag}",
+            "sets": _acc_sets(n_sets, reps),
+        })
+
+    for acc_key in cfg["acc_B"]:
+        if acc_key not in LIFT_TO_TID:
+            continue
+        reps = acc["B"]["reps"]
+        exercises.append({
+            "exercise_template_id": LIFT_TO_TID[acc_key],
+            "superset_id": None,
+            "rest_seconds": 60,
+            "notes": f"B | {n_sets}x{reps} | {phase_tag}",
+            "sets": _acc_sets(n_sets, reps),
+        })
+
+    return exercises
 
 
 def update_hevy_routines(df: pd.DataFrame) -> dict:
